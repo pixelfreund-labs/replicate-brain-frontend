@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-const MODELS: Record<string, string> = {
+const BUILTIN_ENDPOINTS: Record<string, string> = {
   'nano-banana-pro': 'https://api.replicate.com/v1/models/google/nano-banana-pro/predictions',
 }
 
@@ -11,27 +11,25 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json()
-  const { prompt, model = 'nano-banana-pro', aspect_ratio = '16:9', output_format = 'jpg', output_quality = 80 } = body
+  const { input, endpoint, modelId } = body
 
-  if (!prompt?.trim()) {
+  if (!input?.prompt?.trim()) {
     return NextResponse.json({ error: 'Prompt is required' }, { status: 400 })
   }
 
-  const endpoint = MODELS[model]
-  if (!endpoint) {
-    return NextResponse.json({ error: `Unknown model: ${model}` }, { status: 400 })
+  const resolvedEndpoint = endpoint ?? BUILTIN_ENDPOINTS[modelId]
+  if (!resolvedEndpoint) {
+    return NextResponse.json({ error: `Unknown model: ${modelId}` }, { status: 400 })
   }
 
-  const res = await fetch(endpoint, {
+  const res = await fetch(resolvedEndpoint, {
     method: 'POST',
     headers: {
       Authorization: `Token ${token}`,
       'Content-Type': 'application/json',
       Prefer: 'wait',
     },
-    body: JSON.stringify({
-      input: { prompt, aspect_ratio, output_format, output_quality },
-    }),
+    body: JSON.stringify({ input }),
   })
 
   const data = await res.json()

@@ -1,15 +1,17 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback } from 'react'
+import Link from 'next/link'
 import { Button } from '@/components/ui/button'
-import { Textarea } from '@/components/ui/textarea'
-import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
-import { ParamControls } from '@/components/param-controls'
+import { Label } from '@/components/ui/label'
+import { DynamicParams, PromptField } from '@/components/dynamic-params'
 import { HistoryStrip } from '@/components/history-strip'
-import { MODELS, type AspectRatio, type OutputFormat, type HistoryEntry } from '@/lib/models'
+import { AddModelDialog } from '@/components/add-model-dialog'
+import { BUILTIN_MODELS, CUSTOM_MODELS_KEY, getDefaultValues, type ModelDef, type HistoryEntry } from '@/lib/models'
+import { buildInput } from '@/lib/schema'
 import Image from 'next/image'
 
 type Status = 'idle' | 'starting' | 'processing' | 'succeeded' | 'failed'
@@ -23,43 +25,85 @@ const STATUS_COLOR: Record<Status, string> = {
 }
 
 export default function Home() {
-  const [prompt, setPrompt] = useState('')
-  const [model, setModel] = useState('nano-banana-pro')
-  const [aspectRatio, setAspectRatio] = useState<AspectRatio>('16:9')
-  const [outputFormat, setOutputFormat] = useState<OutputFormat>('jpg')
-  const [outputQuality, setOutputQuality] = useState(80)
+  const [allModels, setAllModels] = useState<ModelDef[]>(BUILTIN_MODELS)
+  const [modelId, setModelId] = useState(BUILTIN_MODELS[0].id)
+  const [paramValues, setParamValues] = useState<Record<string, unknown>>(() =>
+    getDefaultValues(BUILTIN_MODELS[0].schema ?? [])
+  )
 
-  const [status, setStatus] = useState<Status>('idle')
-  const [imageUrl, setImageUrl] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [elapsed, setElapsed] = useState(0)
-  const [history, setHistory] = useState<HistoryEntry[]>([])
+  const [status, setStatus]         = useState<Status>('idle')
+  const [imageUrl, setImageUrl]     = useState<string | null>(null)
+  const [error, setError]           = useState<string | null>(null)
+  const [elapsed, setElapsed]       = useState(0)
+  const [history, setHistory]       = useState<HistoryEntry[]>([])
   const [activeHistoryId, setActiveHistoryId] = useState<string | undefined>()
 
   const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const timerRef  = useRef<ReturnType<typeof setInterval> | null>(null)
-  const startRef  = useRef<number>(0)
+  const timerRef   = useRef<ReturnType<typeof setInterval> | null>(null)
+  const startRef   = useRef<number>(0)
 
   const stopTimers = useCallback(() => {
     if (pollingRef.current) clearTimeout(pollingRef.current)
-    if (timerRef.current)  clearInterval(timerRef.current)
+    if (timerRef.current)   clearInterval(timerRef.current)
   }, [])
 
+  // Load custom models + history from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem('replicate-history')
-    if (saved) { try { setHistory(JSON.parse(saved)) } catch { /* ignore */ } }
+    try {
+      const custom = JSON.parse(localStorage.getItem(CUSTOM_MODELS_KEY) ?? '[]') as ModelDef[]
+      if (custom.length) setAllModels([...BUILTIN_MODELS, ...custom])
+    } catch { /* ignore */ }
+    try {
+      const saved = JSON.parse(localStorage.getItem('replicate-history') ?? '[]') as HistoryEntry[]
+      setHistory(saved)
+    } catch { /* ignore */ }
     return stopTimers
   }, [stopTimers])
 
-  const addToHistory = useCallback((id: string, url: string) => {
-    const entry: HistoryEntry = { id, prompt, imageUrl: url, model, aspect_ratio: aspectRatio, createdAt: new Date().toISOString() }
+  const activeModel = allModels.find((m) => m.id === modelId) ?? allModels[0]
+  const schema      = activeModel.schema ?? []
+  const prompt      = String(paramValues['prompt'] ?? '')
+
+  const setPrompt = (v: string) => setParamValues((prev) => ({ ...prev, prompt: v }))
+
+  const handleModelChange = (id: string) => {
+    const m = allModels.find((x) => x.id === id)
+    if (!m) return
+    setModelId(id)
+    setParamValues(getDefaultValues(m.schema ?? []))
+  }
+
+  const handleAddModel = (model: ModelDef) => {
+    setAllModels((prev) => {
+      const next = [...prev, model]
+      const custom = next.filter((m) => !BUILTIN_MODELS.find((b) => b.id === m.id))
+      localStorage.setItem(CUSTOM_MODELS_KEY, JSON.stringify(custom))
+      return next
+    })
+    handleModelChange(model.id)
+  }
+
+  const addToHistory = useCallback((id: string, url: string, dur: number) => {
+    const entry: HistoryEntry = {
+      id, prompt, imageUrl: url, model: modelId,
+      params: { ...paramValues }, createdAt: new Date().toISOString(), duration: dur,
+    }
     setHistory((prev) => {
       const next = [entry, ...prev].slice(0, 10)
       localStorage.setItem('replicate-history', JSON.stringify(next))
       return next
     })
     setActiveHistoryId(id)
-  }, [prompt, model, aspectRatio])
+    // Persist to server log
+    fetch('/api/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id, prompt, imageUrl: url, model: modelId,
+        modelLabel: activeModel.label, params: { ...paramValues }, duration: dur,
+      }),
+    }).catch(() => { /* silent */ })
+  }, [prompt, modelId, paramValues, activeModel.label])
 
   const poll = useCallback(async (id: string) => {
     try {
@@ -67,7 +111,8 @@ export default function Home() {
       const data = await res.json()
       if (data.status === 'succeeded') {
         const url = Array.isArray(data.output) ? data.output[0] : data.output
-        setImageUrl(url); setStatus('succeeded'); stopTimers(); addToHistory(id, url)
+        const dur = Math.floor((Date.now() - startRef.current) / 1000)
+        setImageUrl(url); setStatus('succeeded'); stopTimers(); addToHistory(id, url, dur)
       } else if (data.status === 'failed' || data.error) {
         setError(data.error ?? 'Generation failed'); setStatus('failed'); stopTimers()
       } else {
@@ -86,16 +131,18 @@ export default function Home() {
     startRef.current = Date.now()
     timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)), 1000)
     try {
-      const res  = await fetch('/api/predict', {
+      const input = buildInput(schema, paramValues)
+      const res   = await fetch('/api/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, model, aspect_ratio: aspectRatio, output_format: outputFormat, output_quality: outputQuality }),
+        body: JSON.stringify({ input, endpoint: activeModel.endpoint, modelId }),
       })
       const data = await res.json()
       if (!res.ok || data.error) { setError(data.error ?? 'API error'); setStatus('failed'); stopTimers(); return }
       if (data.status === 'succeeded') {
         const url = Array.isArray(data.output) ? data.output[0] : data.output
-        setImageUrl(url); setStatus('succeeded'); stopTimers(); addToHistory(data.id, url)
+        const dur = Math.floor((Date.now() - startRef.current) / 1000)
+        setImageUrl(url); setStatus('succeeded'); stopTimers(); addToHistory(data.id, url, dur)
       } else {
         setStatus(data.status === 'starting' ? 'starting' : 'processing')
         pollingRef.current = setTimeout(() => poll(data.id), 2000)
@@ -109,11 +156,12 @@ export default function Home() {
 
   const handleSave = () => {
     if (!imageUrl) return
-    const a = document.createElement('a')
-    a.href = imageUrl
+    const a    = document.createElement('a')
+    a.href     = imageUrl
     const ts   = new Date().toISOString().slice(0, 10)
     const slug = prompt.slice(0, 40).toLowerCase().replace(/[^a-z0-9]+/g, '-')
-    a.download = `${ts}-${slug}.${outputFormat}`; a.target = '_blank'; a.click()
+    const fmt  = String(paramValues['output_format'] ?? 'jpg')
+    a.download = `${ts}-${slug}.${fmt}`; a.target = '_blank'; a.click()
   }
 
   const handleHistorySelect = (entry: HistoryEntry) => {
@@ -121,42 +169,46 @@ export default function Home() {
     setActiveHistoryId(entry.id); setStatus('succeeded'); setError(null)
   }
 
-  const handleParam = (key: string, value: string | number) => {
-    if (key === 'aspect_ratio')   setAspectRatio(value as AspectRatio)
-    if (key === 'output_format')  setOutputFormat(value as OutputFormat)
-    if (key === 'output_quality') setOutputQuality(value as number)
-  }
-
   return (
     <div className="flex flex-col h-screen bg-zinc-950 text-zinc-100">
 
-      {/* ── Header ── */}
+      {/* Header */}
       <header className="shrink-0 border-b border-zinc-800 bg-zinc-950 px-6 py-3 flex items-center gap-3">
         <span className="text-sm font-semibold font-mono text-zinc-100">replicate.brain</span>
         <Separator orientation="vertical" className="h-4 bg-zinc-700" />
         <span className="text-xs text-zinc-500">Nano-Banana-PRO via Replicate</span>
-        {status !== 'idle' && (
-          <Badge variant="outline" className={`ml-auto text-[10px] font-mono ${STATUS_COLOR[status]}`}>
-            {status}{isGenerating && elapsed > 0 ? ` · ${elapsed}s` : ''}
-          </Badge>
-        )}
+        <div className="ml-auto flex items-center gap-2">
+          {status !== 'idle' && (
+            <Badge variant="outline" className={`text-[10px] font-mono ${STATUS_COLOR[status]}`}>
+              {status}{isGenerating && elapsed > 0 ? ` · ${elapsed}s` : ''}
+            </Badge>
+          )}
+          <Link href="/playground">
+            <Button variant="outline" size="sm" className="border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 text-xs h-7 px-2.5">
+              🎞 Playground
+            </Button>
+          </Link>
+        </div>
       </header>
 
-      {/* ── Body ── */}
+      {/* Body */}
       <div className="flex flex-1 overflow-hidden">
 
         {/* Left panel */}
-        <aside className="w-72 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col gap-5 px-5 py-5 overflow-y-auto">
+        <aside className="w-72 shrink-0 border-r border-zinc-800 bg-zinc-950 flex flex-col gap-4 px-5 py-5 overflow-y-auto">
 
-          {/* Model */}
+          {/* Model selector */}
           <div className="space-y-1.5">
-            <Label className="text-xs text-zinc-400">Modell</Label>
-            <Select value={model} onValueChange={(v) => { if (v) setModel(v) }} disabled={isGenerating}>
+            <div className="flex items-center justify-between">
+              <Label className="text-xs text-zinc-400">Modell</Label>
+              <AddModelDialog onAdd={handleAddModel} />
+            </div>
+            <Select value={modelId} onValueChange={(v) => { if (v) handleModelChange(v) }} disabled={isGenerating}>
               <SelectTrigger className="h-8 text-sm bg-zinc-900 border-zinc-700 text-zinc-100 focus:ring-zinc-600">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent className="bg-zinc-900 border-zinc-700 text-zinc-100">
-                {MODELS.map((m) => (
+                {allModels.map((m) => (
                   <SelectItem key={m.id} value={m.id} className="focus:bg-zinc-800 focus:text-zinc-100">
                     {m.label}
                   </SelectItem>
@@ -166,32 +218,25 @@ export default function Home() {
           </div>
 
           {/* Prompt */}
-          <div className="flex flex-col gap-1.5 flex-1">
-            <div className="flex items-center justify-between">
-              <Label className="text-xs text-zinc-400">Prompt</Label>
-              <span className="text-[10px] text-zinc-600 font-mono">{prompt.length}</span>
-            </div>
-            <Textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Describe the image…"
-              disabled={isGenerating}
-              className="flex-1 min-h-44 resize-none bg-zinc-900 border-zinc-700 text-zinc-100 placeholder:text-zinc-600 text-sm focus-visible:ring-zinc-600"
-              onKeyDown={(e) => { if (e.key === 'Enter' && e.metaKey) generate() }}
-            />
-          </div>
+          <PromptField
+            value={prompt}
+            onChange={setPrompt}
+            disabled={isGenerating}
+            charCount
+            onSubmit={generate}
+          />
 
           <Separator className="bg-zinc-800" />
 
-          <ParamControls
-            aspectRatio={aspectRatio}
-            outputFormat={outputFormat}
-            outputQuality={outputQuality}
-            onChange={handleParam}
+          {/* Dynamic params */}
+          <DynamicParams
+            fields={schema}
+            values={paramValues}
+            onChange={(k, v) => setParamValues((prev) => ({ ...prev, [k]: v }))}
             disabled={isGenerating}
           />
 
-          <div className="space-y-1">
+          <div className="space-y-1 mt-auto">
             <Button
               onClick={generate}
               disabled={!prompt.trim() || isGenerating}
@@ -208,26 +253,16 @@ export default function Home() {
           </div>
         </aside>
 
-        {/* Right panel – preview */}
+        {/* Right panel */}
         <main className="flex-1 flex flex-col gap-4 p-6 overflow-y-auto bg-zinc-950">
-
-          {/* Image / placeholder */}
           <div className="flex-1 flex items-center justify-center min-h-64 rounded-lg border border-zinc-800 bg-zinc-900">
             {imageUrl ? (
-              <Image
-                src={imageUrl}
-                alt={prompt}
-                width={1280}
-                height={720}
-                className="rounded-lg object-contain max-h-[65vh] w-auto shadow-2xl"
-                unoptimized
-              />
+              <Image src={imageUrl} alt={prompt} width={1280} height={720}
+                className="rounded-lg object-contain max-h-[65vh] w-auto shadow-2xl" unoptimized />
             ) : isGenerating ? (
               <div className="flex flex-col items-center gap-4 text-zinc-500">
                 <div className="w-10 h-10 border-2 border-zinc-700 border-t-violet-500 rounded-full animate-spin" />
-                <p className="text-sm font-mono">
-                  {status === 'starting' ? 'Starting…' : `Processing… ${elapsed}s`}
-                </p>
+                <p className="text-sm font-mono">{status === 'starting' ? 'Starting…' : `Processing… ${elapsed}s`}</p>
               </div>
             ) : error ? (
               <div className="text-center space-y-1.5">
@@ -242,22 +277,14 @@ export default function Home() {
             )}
           </div>
 
-          {/* Actions */}
           {imageUrl && status === 'succeeded' && (
             <div className="flex gap-2 justify-end">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => navigator.clipboard.writeText(prompt)}
-                className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 text-xs"
-              >
+              <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(prompt)}
+                className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 text-xs">
                 📋 Copy Prompt
               </Button>
-              <Button
-                size="sm"
-                onClick={handleSave}
-                className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs border border-zinc-700"
-              >
+              <Button size="sm" onClick={handleSave}
+                className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs border border-zinc-700">
                 💾 Save Image
               </Button>
             </div>
