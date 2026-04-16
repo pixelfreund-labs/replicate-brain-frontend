@@ -30,12 +30,12 @@ export function ParamControls({
             onValueChange={(v) => { if (v) onChange('aspect_ratio', v) }}
             disabled={disabled}
           >
-            <SelectTrigger className="h-8 text-sm bg-zinc-900 border-zinc-700 text-zinc-100">
+            <SelectTrigger className="h-8 text-sm bg-zinc-900 border-zinc-700 text-zinc-100 focus:ring-zinc-600">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent className="bg-zinc-900 border-zinc-700">
+            <SelectContent className="bg-zinc-900 border-zinc-700 text-zinc-100">
               {ASPECT_RATIOS.map((r) => (
-                <SelectItem key={r} value={r} className="text-zinc-100 focus:bg-zinc-800">
+                <SelectItem key={r} value={r} className="focus:bg-zinc-800 focus:text-zinc-100">
                   {r}
                 </SelectItem>
               ))}
@@ -50,12 +50,12 @@ export function ParamControls({
             onValueChange={(v) => { if (v) onChange('output_format', v) }}
             disabled={disabled}
           >
-            <SelectTrigger className="h-8 text-sm bg-zinc-900 border-zinc-700 text-zinc-100">
+            <SelectTrigger className="h-8 text-sm bg-zinc-900 border-zinc-700 text-zinc-100 focus:ring-zinc-600">
               <SelectValue />
             </SelectTrigger>
-            <SelectContent className="bg-zinc-900 border-zinc-700">
+            <SelectContent className="bg-zinc-900 border-zinc-700 text-zinc-100">
               {OUTPUT_FORMATS.map((f) => (
-                <SelectItem key={f} value={f} className="text-zinc-100 focus:bg-zinc-800">
+                <SelectItem key={f} value={f} className="focus:bg-zinc-800 focus:text-zinc-100">
                   {f}
                 </SelectItem>
               ))}
